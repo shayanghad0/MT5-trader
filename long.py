@@ -31,6 +31,30 @@ def close_position(symbol, ticket, volume, price, deviation=20):
     return mt5.order_send(request)
 
 
+def set_take_profit(ticket, tp_price):
+    """
+    Modify an open position to set its Take‑Profit level.
+    Stop‑Loss is left unchanged (set to 0 means no SL).
+    """
+    request = {
+        "action": mt5.TRADE_ACTION_SLTP,
+        "position": ticket,
+        "tp": tp_price,
+        # sl is omitted -> keeps current or none
+    }
+    result = mt5.order_send(request)
+    return result
+
+
+def get_open_position(symbol):
+    """Return the first open position for a given symbol, or None."""
+    positions = mt5.positions_get(symbol=symbol)
+    if positions is None:
+        return None
+    # Return first position (normally there should be only one per symbol)
+    return positions[0] if positions else None
+
+
 def main():
     print("=== MT5 Login ===")
 
@@ -69,6 +93,26 @@ def main():
             mt5.shutdown()
             sys.exit(1)
 
+    # ---------- Check for existing open position ----------
+    existing = get_open_position(symbol)
+    if existing is not None:
+        print(f"Open position already exists for {symbol} (ticket {existing.ticket}).")
+        close_existing = input("Close it and continue? (y/n): ").strip().lower()
+        if close_existing == 'y':
+            close_result = close_position(symbol, existing.ticket, existing.volume, mt5.symbol_info_tick(symbol).bid)
+            if close_result.retcode == mt5.TRADE_RETCODE_DONE:
+                print("Existing position closed.")
+                time.sleep(1)  # wait a moment
+            else:
+                print(f"Failed to close existing position, retcode={close_result.retcode}")
+                mt5.shutdown()
+                sys.exit(1)
+        else:
+            print("Exiting without changes.")
+            mt5.shutdown()
+            sys.exit(0)
+
+    # ---------- Lot size ----------
     try:
         lot = float(input("Enter base lot size (e.g., 0.01): "))
         if lot <= 0:
@@ -78,7 +122,7 @@ def main():
         mt5.shutdown()
         sys.exit(1)
 
-    # ---------- Threshold handling (Take‑Profit only) ----------
+    # ---------- Threshold handling ----------
     global THRESHOLD_POINTS
     threshold = THRESHOLD_POINTS
     if threshold is None:
@@ -122,7 +166,7 @@ def main():
 
     print(f"Buy order placed successfully! Ticket: {result.order}, Volume: {lot}, Price: {result.price}")
 
-    # Save trade details
+    # Save trade details to JSON (appends to history)
     trade_data = {
         "ticket": result.order,
         "symbol": symbol,
@@ -144,9 +188,9 @@ def main():
     entry_price = result.price
     ticket = result.order
 
-    print("\nMonitoring price... Press Ctrl+C to stop.")
+    print("\nMonitoring price... Press Ctrl+C to set a Take‑Profit order and exit.")
     print(f"Buy price: {entry_price:.2f}")
-    print(f"Auto‑close will trigger ONLY when profit reaches {threshold} points (no stop‑loss).")
+    print(f"Auto‑close will trigger at +{threshold} points, or you can press Ctrl+C to set TP.")
 
     try:
         while True:
@@ -171,7 +215,7 @@ def main():
 
             print(f"\r{color}Current price: {current_price:.2f} | Points: {sign}{points:.1f} points{Style.RESET_ALL}", end="")
 
-            # ---- CLOSE ONLY ON PROFIT (positive points) ----
+            # Automatic close on profit target
             if points >= threshold:
                 print(f"\n\nProfit target reached: {points:.1f} points. Closing position...")
                 close_result = close_position(symbol, ticket, lot, tick.bid)
@@ -184,7 +228,19 @@ def main():
             time.sleep(1)
 
     except KeyboardInterrupt:
-        print("\nMonitoring stopped by user.")
+        print("\n\nCtrl+C detected. Setting Take‑Profit order...")
+        # Verify the position still exists
+        pos = get_open_position(symbol)
+        if pos is None or pos.ticket != ticket:
+            print("Position no longer open. Cannot set TP.")
+        else:
+            tp_price = entry_price + (threshold * point)
+            modify_result = set_take_profit(ticket, tp_price)
+            if modify_result.retcode == mt5.TRADE_RETCODE_DONE:
+                print(f"Take‑Profit set successfully at {tp_price:.2f} (target: {threshold} points).")
+            else:
+                print(f"Failed to set TP, retcode={modify_result.retcode}, comment: {modify_result.comment}")
+        print("Exiting monitoring.")
 
     finally:
         mt5.shutdown()
