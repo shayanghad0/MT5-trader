@@ -7,13 +7,16 @@ from colorama import Fore, Style, init as colorama_init
 # Initialize colorama for cross‑platform colored terminal output
 colorama_init(autoreset=True)
 
+# --- CONFIGURABLE TARGET (change this value in the code if desired) ---
+TARGET_POINTS = 80.0 # default target in points (can be overridden by user input)
+
 
 def main():
     print("=== MT5 Login ===")
 
     # Get login credentials
     account = input("Enter account number: ")
-    password = ("Enter password: ")
+    password = input("Enter password: ")
     server = input("Enter server name: ")
 
     # Initialize MT5 connection
@@ -61,6 +64,19 @@ def main():
         print(f"Invalid lot size: {e}")
         mt5.shutdown()
         sys.exit(1)
+
+    # Get target points (optional, default from TARGET_POINTS)
+    target_input = input(f"Enter target points (default {TARGET_POINTS}, press Enter to use default): ").strip()
+    if target_input == "":
+        target_points = TARGET_POINTS
+    else:
+        try:
+            target_points = float(target_input)
+            if target_points <= 0:
+                raise ValueError("Target points must be positive")
+        except ValueError as e:
+            print(f"Invalid target points, using default {TARGET_POINTS}")
+            target_points = TARGET_POINTS
 
     # Prepare market buy order
     tick = mt5.symbol_info_tick(symbol)
@@ -114,6 +130,7 @@ def main():
 
     print("\nMonitoring price... Press Ctrl+C to stop.")
     print(f"Buy price: {result.price:.2f}")
+    print(f"Target: {target_points:.1f} points profit → will close automatically.")
 
     try:
         while True:
@@ -139,6 +156,44 @@ def main():
 
             # Overwrite the same line with the updated price and point difference
             print(f"\r{color}Current price: {current_price:.2f} | Points: {sign}{points:.1f} points{Style.RESET_ALL}", end="")
+
+            # If profit reaches target points or more, close the buy position
+            if points >= target_points:
+                print("\nTarget profit reached! Closing position...")
+                # Send a market sell order to close the buy position
+                close_request = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "symbol": symbol,
+                    "volume": lot,
+                    "type": mt5.ORDER_TYPE_SELL,
+                    "price": tick.bid,          # Sell at bid price
+                    "deviation": 20,
+                    "magic": 234000,
+                    "comment": "close buy",
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": mt5.ORDER_FILLING_IOC,
+                }
+                close_result = mt5.order_send(close_request)
+                if close_result.retcode == mt5.TRADE_RETCODE_DONE:
+                    print(f"Position closed successfully! Sell ticket: {close_result.order}, Price: {close_result.price}")
+                    # Update trade_data with closing info
+                    trade_data["close_price"] = close_result.price
+                    trade_data["close_time"] = time.time()
+                    trade_data["profit_points"] = points
+                    # Update the last entry in history
+                    try:
+                        with open("trade_history.json", "r") as f:
+                            history = json.load(f)
+                        if history:
+                            history[-1].update(trade_data)
+                        with open("trade_history.json", "w") as f:
+                            json.dump(history, f, indent=4)
+                    except:
+                        pass
+                else:
+                    print(f"Failed to close position, retcode={close_result.retcode}")
+                break  # exit monitoring loop
+
             time.sleep(1)
 
     except KeyboardInterrupt:
